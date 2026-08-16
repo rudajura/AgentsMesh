@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "interfaces.go",
         "merge_requests.go",
+        "mr_live_sync.go",
         "service.go",
         "service_create.go",
         "service_sync.go",

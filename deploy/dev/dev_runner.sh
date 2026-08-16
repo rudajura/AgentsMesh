@@ -4,9 +4,8 @@
 # `bazel run` sets BUILD_WORKSPACE_DIRECTORY to the workspace root. We cd
 # into the live source tree's deploy/dev/ before exec-ing dev.sh, so dev.sh's
 # SCRIPT_DIR resolves to the real path — required because dev.sh writes
-# `.env`, runs `docker compose`, references `runner.Dockerfile` build context,
-# and copies the bazel-built runner binary to `deploy/dev/runner-binary`. All
-# of that needs to land in the source tree, not the bazel runfiles tree.
+# `.env`, runs `docker compose`, and writes host runtime files. All of that
+# needs to land in the source tree, not the bazel runfiles tree.
 #
 # The sh_binary `args` attribute in BUILD.bazel pins each target to one
 # dev.sh flag (e.g. `:clean` → `--clean`), so `bazel run //deploy/dev:clean`

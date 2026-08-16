@@ -139,14 +139,39 @@ EOF
 
     # Codex
     mkdir -p "${HOME}/.codex"
-    if [[ ! -f "${HOME}/.codex/config.toml" ]]; then
-        cat > "${HOME}/.codex/config.toml" << 'EOF'
+    local codex_config="${HOME}/.codex/config.toml"
+    if [[ ! -f "$codex_config" ]]; then
+        cat > "$codex_config" << 'EOF'
 model = "gpt-4.1"
 approval_policy = "never"
 sandbox_mode = "workspace-write"
 
 [shell_environment_policy]
 inherit = "all"
+
+[features]
+use_legacy_landlock = true
+EOF
+    elif grep -Eq '^[[:space:]]*use_legacy_landlock[[:space:]]*=' "$codex_config"; then
+        sed -i -E 's/^[[:space:]]*use_legacy_landlock[[:space:]]*=.*/use_legacy_landlock = true/' "$codex_config"
+    elif grep -Eq '^[[:space:]]*\[features\][[:space:]]*$' "$codex_config"; then
+        local codex_tmp
+        codex_tmp="$(mktemp)"
+        awk '
+            /^\[features\][[:space:]]*$/ && !added {
+                print
+                print "use_legacy_landlock = true"
+                added = 1
+                next
+            }
+            { print }
+        ' "$codex_config" > "$codex_tmp"
+        mv "$codex_tmp" "$codex_config"
+    else
+        cat >> "$codex_config" << 'EOF'
+
+[features]
+use_legacy_landlock = true
 EOF
     fi
 

@@ -13,7 +13,7 @@
 # `AGENTSMESH_WORKTREE_NAME` env override takes precedence. Required by CI
 # shards: detached-HEAD checkouts (PR + push events) resolve to the literal
 # string "HEAD" → slug "head", so every PR / every shard collapses onto the
-# same compose project name and the same backend / DB / runner container.
+# same compose project name and the same backend / DB / runner state.
 # Two shards on the same self-hosted host then end up sharing the dev-org
 # pod table — a `terminateAllPods()` cleanup hook in one shard wipes the
 # in-flight pod of the other. The override is opt-in; local devs and the
@@ -53,5 +53,5 @@ calculate_port_offset() {
 }
 
 # Mutable runtime state root: host service pids/logs, runner cert, isolated
-# HOME for the runner container's CLI configs. Gitignored.
+# HOME for runner CLI configs. Gitignored.
 _runtime_dir() { echo "$SCRIPT_DIR/runtime"; }

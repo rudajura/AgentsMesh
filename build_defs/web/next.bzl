@@ -101,6 +101,20 @@ def next_app(
         # invocations still work.
         tags = tags + ["manual"],
         tool = next_js_binary,
+        # next.config.ts's rewrites()/env{} read process.env at `next build`
+        # time (Next.js only re-evaluates them at `next start` if they
+        # inspect request-time state like headers/cookies — this config
+        # doesn't, so the result gets frozen into routes-manifest.json).
+        # js_run_binary sandboxes actions by default and drops the invoking
+        # shell's env; deploy/dev's prod-frontend flow needs API_PROXY_TARGET
+        # et al. to reach this specific `next build` invocation, and
+        # --action_env alone is a no-op without this flag (it only populates
+        # ctx.configuration.default_shell_env — an action must opt in to
+        # reading it). This target isn't the production OCI image path
+        # (that's next_standalone_app below), so trading some hermeticity
+        # here for a working local dev/prod-parity build is an acceptable
+        # tradeoff.
+        use_default_shell_env = True,
         **kwargs
     )
 

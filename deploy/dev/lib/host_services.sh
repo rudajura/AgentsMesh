@@ -1,11 +1,9 @@
 # shellcheck shell=bash
-# host_services.sh — host-side ibazel service lifecycle.
+# host_services.sh — host-side service lifecycle.
 #
-# Backend / relay run on the developer host (post air → ibazel migration);
-# this module owns their build / launch / teardown / health checks.
-# Runner stays in docker but its binary is also bazel-built — see
-# `build_runner_binary` for the cross-compile path that feeds the docker
-# image's COPY.
+# Backend / relay run via ibazel. Runner runs as a host process with its own
+# generated config and local workspace root, so pods edit host worktrees
+# instead of files inside a docker volume.
 
 # Wait for an HTTP endpoint to return success. 1-second polling, default
 # 40 attempts (= 40s max). Used for backend / relay health checks.
@@ -72,6 +70,27 @@ _launch_ibazel() {
     )
 }
 
+_launch_host_process() {
+    local name="$1"; shift
+    local rt_dir
+    rt_dir="$(_runtime_dir)/$name"
+    mkdir -p "$rt_dir"
+    local pid_file="$rt_dir/$name.pid"
+    local pgid_file="$rt_dir/$name.pgid"
+    local log_file="$rt_dir/$name.log"
+
+    _stop_host_service "$name"
+
+    info "启动 host service: $name"
+    (
+        python3 -c "import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])" \
+            "$@" > "$log_file" 2>&1 &
+        echo $! > "$pid_file"
+        echo $! > "$pgid_file"
+        disown
+    )
+}
+
 # Reap any process LISTENING on a worktree-allocated port before launching a
 # host service on it. Ports are worktree-unique (offset×50), so this is scoped
 # to THIS worktree — unlike pkill-by-binary-path, which would match every
@@ -91,6 +110,33 @@ _reap_port() {
         kill -9 $pids 2>/dev/null || true
         sleep 1
     fi
+}
+
+# Build host-native runner artifacts and copy tool binaries into the host
+# runner runtime bin directory. The runner itself is launched from this copied
+# binary so its isolated HOME does not move Bazel/ibazel state under runtime/.
+build_runner_host_artifacts() {
+    info "Bazel build host runner artifacts..."
+    local repo_root="$SCRIPT_DIR/../.."
+    local runner_rt="$(_runtime_dir)/runner"
+    local bin_dir="$runner_rt/bin"
+    mkdir -p "$bin_dir"
+    (
+        cd "$repo_root"
+        bazel build \
+            //runner/cmd/runner:runner \
+            //runner/internal/agents/mockagent/cmd/e2e-mock-agent:e2e-mock-agent
+    ) || {
+        error "Host runner artifacts 构建失败"
+        return 1
+    }
+    rm -f "$bin_dir/agentsmesh-runner" "$bin_dir/e2e-mock-agent"
+    cp -L "$repo_root/bazel-bin/runner/cmd/runner/runner_/runner" \
+        "$bin_dir/agentsmesh-runner" || return 1
+    cp -L "$repo_root/bazel-bin/runner/internal/agents/mockagent/cmd/e2e-mock-agent/e2e-mock-agent_/e2e-mock-agent" \
+        "$bin_dir/e2e-mock-agent" || return 1
+    chmod +x "$bin_dir/agentsmesh-runner" "$bin_dir/e2e-mock-agent"
+    success "Host runner artifacts 已就绪 ($bin_dir)"
 }
 
 # Cross-compile the runner binary for linux/amd64 and copy it to
@@ -291,8 +337,145 @@ start_relay_host() {
     success "Relay 已就绪 (host :${RELAY_HTTP_PORT})"
 }
 
-# Stop host backend / relay. Runner stays in docker, so `clean` handles
-# it via `docker compose down`. Process-group-kill is the central trick:
+prepare_runner_home() {
+    local runner_home="$(_runtime_dir)/runner/home"
+    mkdir -p "$runner_home/.agentsmesh" "$runner_home/.claude" "$runner_home/.codex" "$runner_home/.gemini"
+
+    if [[ "${AGENTSMESH_DEV_SYNC_CODEX_AUTH:-false}" == "true" ]]; then
+        sync_host_codex_auth "$runner_home/.codex"
+    elif [[ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]]; then
+        warn "Codex auth not synced; set AGENTSMESH_DEV_SYNC_CODEX_AUTH=true to reuse host ChatGPT login"
+    fi
+
+    cp "$SCRIPT_DIR/ai-cli-configs/codex/config.toml" "$runner_home/.codex/config.toml"
+    cp "$SCRIPT_DIR/ai-cli-configs/gemini/settings.json" "$runner_home/.gemini/settings.json"
+    cp "$SCRIPT_DIR/ai-cli-configs/claude/settings.json" "$runner_home/.claude/settings.json"
+
+    if [[ ! -e "$runner_home/.claude.json" ]]; then
+        printf '{"hasCompletedOnboarding":true}\n' > "$runner_home/.claude.json"
+    fi
+}
+
+sync_host_codex_auth() {
+    local target_dir="$1"
+    local source_dir="${CODEX_HOME:-$HOME/.codex}"
+    [[ "$source_dir" == "$target_dir" ]] && return 0
+    [[ -d "$source_dir" ]] || return 0
+
+    local copied=false
+    local file
+    for file in auth.json installation_id .codex-global-state.json version.json models_cache.json; do
+        if [[ -f "$source_dir/$file" ]]; then
+            cp -p "$source_dir/$file" "$target_dir/$file"
+            copied=true
+        fi
+    done
+
+    if [[ "$copied" == "true" ]]; then
+        success "Codex auth/config synced from $source_dir"
+    fi
+}
+
+host_runner_workspace_root() {
+    local repo_root="$SCRIPT_DIR/../.."
+    local worktree_name="${WORKTREE_NAME:-$(get_worktree_name)}"
+    echo "${HOST_RUNNER_WORKSPACE_ROOT:-$(cd "$repo_root/.." && pwd)/AgentsMesh-Pods/$worktree_name}"
+}
+
+generate_host_runner_config() {
+    source "$ENV_FILE"
+    generate_runner_cert
+    prepare_runner_home
+
+    local runner_rt="$(_runtime_dir)/runner"
+    local config_file="$runner_rt/config.yaml"
+    local certs_dir="$runner_rt/certs"
+    local workspace_root
+    workspace_root="$(host_runner_workspace_root)"
+    local runner_bin="$runner_rt/bin"
+    local pod_path="$runner_bin:${PATH}"
+
+    mkdir -p "$runner_rt" "$workspace_root"
+    cat > "$config_file" << EOF
+# AgentsMesh Runner — auto-generated host dev config
+server_url: "http://localhost:${HTTP_PORT}"
+grpc_endpoint: "127.0.0.1:${GRPC_PORT}"
+cert_file: "${certs_dir}/runner.crt"
+key_file: "${certs_dir}/runner.key"
+ca_file: "${certs_dir}/ca.crt"
+relay_base_url: "ws://localhost:${HTTP_PORT}"
+node_id: "dev-runner"
+description: "Development Host Runner"
+org_slug: "dev-org"
+max_concurrent_pods: 10
+workspace: "${workspace_root}"
+workspace_root: "${workspace_root}"
+base_branch: "main"
+default_agent: "claude-code"
+default_shell: "${SHELL:-/bin/bash}"
+mcp_port: ${RUNNER_MCP_PORT}
+health_check_port: $((RUNNER_MCP_PORT + 1))
+log_level: "debug"
+agent_env_vars:
+  PATH: "${pod_path}"
+EOF
+    success "生成 host runner config ($config_file, workspace: $workspace_root)"
+}
+
+start_runner_host() {
+    source "$ENV_FILE"
+    build_runner_host_artifacts || return 1
+    generate_host_runner_config || return 1
+
+    local runner_rt="$(_runtime_dir)/runner"
+    local runner_home="$runner_rt/home"
+    local runner_bin="$runner_rt/bin"
+    local config_file="$runner_rt/config.yaml"
+
+    _reap_port "$RUNNER_MCP_PORT" "runner MCP"
+
+    (
+        export HOME="$runner_home"
+        export PATH="$runner_bin:$PATH"
+        export AGENTSMESH_MCP_BIND=127.0.0.1
+        export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:${OTEL_GRPC_PORT}"
+        export OTEL_SERVICE_NAME=agentsmesh-runner
+        export OTEL_TRACES_SAMPLER_ARG=1.0
+
+        _launch_host_process runner "$runner_bin/agentsmesh-runner" run --config "$config_file"
+    )
+
+    if ! _wait_http "http://127.0.0.1:${RUNNER_MCP_PORT}/health" runner 120; then
+        error "Runner 启动失败，查看日志: $(_runtime_dir)/runner/runner.log"
+        echo "--- runner.log (last 120 lines) ---" >&2
+        tail -120 "$(_runtime_dir)/runner/runner.log" >&2 || true
+        return 1
+    fi
+    success "Runner 已就绪 (host MCP :${RUNNER_MCP_PORT}, workspace: $(host_runner_workspace_root))"
+}
+
+_stop_host_service() {
+    local svc="$1"
+    local rt_root="$(_runtime_dir)"
+    local pgid_file="$rt_root/$svc/$svc.pgid"
+    local pid_file="$rt_root/$svc/$svc.pid"
+    if [[ -f "$pgid_file" ]]; then
+        local pgid
+        pgid=$(cat "$pgid_file" 2>/dev/null || true)
+        if [[ -n "$pgid" ]]; then
+            info "停止 host $svc (pgid: $pgid)..."
+            kill -TERM -- "-$pgid" 2>/dev/null || true
+            sleep 1
+            kill -KILL -- "-$pgid" 2>/dev/null || true
+        fi
+        rm -f "$pgid_file"
+    fi
+    if [[ -f "$pid_file" ]]; then
+        rm -f "$pid_file" 2>/dev/null || true
+    fi
+}
+
+# Stop host backend / relay / runner. Process-group-kill is the central trick:
 # `_launch_ibazel` records the pgid (== ibazel's PID under setsid), so a
 # single `kill -- -PGID` reaps ibazel + the bazel-spawned binary in one
 # shot, even though the binary detached from ibazel's direct parent
@@ -301,21 +484,8 @@ stop_host_services() {
     local rt_root
     rt_root="$(_runtime_dir)"
     [[ -d "$rt_root" ]] || return 0
-    for svc in backend relay; do
-        local pgid_file="$rt_root/$svc/$svc.pgid"
-        local pid_file="$rt_root/$svc/$svc.pid"
-        if [[ -f "$pgid_file" ]]; then
-            local pgid
-            pgid=$(cat "$pgid_file" 2>/dev/null || true)
-            if [[ -n "$pgid" ]]; then
-                info "停止 host $svc (pgid: $pgid)..."
-                kill -TERM -- "-$pgid" 2>/dev/null || true
-                sleep 1
-                kill -KILL -- "-$pgid" 2>/dev/null || true
-            fi
-            rm -f "$pgid_file"
-        fi
-        rm -f "$pid_file" 2>/dev/null || true
+    for svc in runner relay backend; do
+        _stop_host_service "$svc"
     done
     # Belt-and-suspenders: kill anything still hanging on the bazel-bin
     # path (e.g. a server that survived the pgid window because it forked

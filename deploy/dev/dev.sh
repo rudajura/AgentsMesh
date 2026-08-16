@@ -9,9 +9,10 @@
 #   - arg parsing + main orchestration
 #
 # 一键启动开发环境：
-#   ./dev.sh                # docker infra + host backend/relay + frontend
+#   ./dev.sh                # docker infra + host backend/relay/runner + frontend
 #   ./dev.sh --backend-only # 跳过 frontend (CI 用)
-#   ./dev.sh --rebuild-runner   # 重 build runner binary + 重启 runner 容器
+#   ./dev.sh --prod-frontend   # build frontend once, then serve with next start
+#   ./dev.sh --rebuild-runner   # 重 build runner binary + 重启 host runner
 #   ./dev.sh --clean        # 清理所有服务
 #   ./dev.sh --help         # 帮助
 # =============================================================================
@@ -41,6 +42,8 @@ source "$SCRIPT_DIR/lib/host_services.sh"
 source "$SCRIPT_DIR/lib/bootstrap.sh"
 # shellcheck source=lib/frontend_services.sh
 source "$SCRIPT_DIR/lib/frontend_services.sh"
+# shellcheck source=lib/frontend_prod_services.sh
+source "$SCRIPT_DIR/lib/frontend_prod_services.sh"
 # shellcheck source=lib/lifecycle.sh
 source "$SCRIPT_DIR/lib/lifecycle.sh"
 
@@ -63,7 +66,25 @@ main() {
     esac
 
     local backend_only=false
-    [[ "${1:-}" == "--backend-only" ]] && backend_only=true
+    export AGENTSMESH_DEV_FRONTEND_MODE="${AGENTSMESH_DEV_FRONTEND_MODE:-dev}"
+    for arg in "$@"; do
+        case "$arg" in
+            --backend-only)
+                backend_only=true
+                ;;
+            --prod-frontend)
+                AGENTSMESH_DEV_FRONTEND_MODE="prod"
+                ;;
+            --dev-frontend)
+                AGENTSMESH_DEV_FRONTEND_MODE="dev"
+                ;;
+            *)
+                error "Unknown option: $arg"
+                print_usage
+                exit 1
+                ;;
+        esac
+    done
 
     print_banner
 
@@ -73,21 +94,13 @@ main() {
     generate_env
     source "$ENV_FILE"
     check_ibazel_doctor
+    check_codex_sandbox_doctor
     generate_traefik_config
     generate_web_env
     generate_web_admin_env
     generate_runner_ssh_key
 
-    # Phase 2: bazel-build the runner binary so docker compose's runner
-    # service can COPY it during image build (build context = deploy/dev).
-    build_runner_binary
-    # Cross-compile the e2e-mock-agent alongside the runner — same build
-    # context, same image. Required for mcp-e2e / envbundle-e2e / acp-ui-e2e
-    # which depend on the `e2e-echo` AgentFile resolving `EXECUTABLE
-    # e2e-mock-agent` to a real binary on the runner's PATH.
-    build_mock_agent_binary
-
-    # Phase 3: docker infrastructure + DB bootstrap.
+    # Phase 2: docker infrastructure + DB bootstrap.
     docker_compose_up
     wait_for_postgres
     run_migrations
@@ -95,13 +108,13 @@ main() {
     init_gitea
     setup_gitea_ssh_config
 
-    # Phase 4: host services. backend must come up before runner can
-    # complete its mTLS handshake — runner container connects via
-    # traefik:9443, traefik passthroughs to host backend.
+    # Phase 3: host services. backend must come up before runner can
+    # complete its mTLS handshake.
     start_backend_host
     start_relay_host
+    start_runner_host
 
-    # Phase 5: frontends (skipped in CI).
+    # Phase 4: frontends (skipped in CI).
     if [[ "$backend_only" == "true" ]]; then
         info "--backend-only: skipping frontend startup"
     else

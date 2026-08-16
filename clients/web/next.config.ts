@@ -10,6 +10,12 @@ const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 // auto-infer this; after moving under `clients/web/`, we must pin it.
 const here = path.dirname(fileURLToPath(import.meta.url));
 const monorepoRoot = path.resolve(here, "../..");
+const useDevBuildOutput =
+  process.env.BAZEL_TARGET_NAME === "next" ||
+  process.env.AGENTSMESH_DEV_FRONTEND_MODE === "prod";
+const enableLocalProxy =
+  process.env.NODE_ENV === "development" ||
+  process.env.AGENTSMESH_DEV_FRONTEND_PROXY === "true";
 
 // `output: 'standalone'` packages the server + its transitive
 // node_modules into `.next/standalone/` for a slim Docker image. The
@@ -32,9 +38,7 @@ const nextConfig: NextConfig = {
   // to `.next-dev/` so Bazel's wildcard build (`//...`) doesn't see
   // two actions declaring the same output. `BAZEL_TARGET_NAME` is
   // set by js_run_binary and matches the BUILD `next_build_out` arg.
-  ...(process.env.BAZEL_TARGET_NAME === "next"
-    ? { distDir: ".next-dev" as const }
-    : {}),
+  ...(useDevBuildOutput ? { distDir: ".next-dev" as const } : {}),
 
   // Type checks live in the separate "Web (lint + type-check +
   // vitest)" Bazel job (plain `pnpm type-check`). Don't re-run them
@@ -115,7 +119,7 @@ const nextConfig: NextConfig = {
     const proxyTarget = process.env.API_PROXY_TARGET;
 
     // 仅在本地开发且配置了代理目标时启用
-    if (process.env.NODE_ENV === "development" && proxyTarget) {
+    if (enableLocalProxy && proxyTarget) {
       console.log(`[Next.js] API proxy enabled: /api/* + /proto.* + /health → ${proxyTarget}`);
       return [
         {

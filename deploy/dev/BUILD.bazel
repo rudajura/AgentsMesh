@@ -5,15 +5,16 @@
 # don't need to remember flag spellings:
 #
 #   bazel run //deploy/dev:up                # full stack
+#   bazel run //deploy/dev:up_prod_frontend  # full stack + next build/start
 #   bazel run //deploy/dev:backend_only      # CI E2E (no frontend)
 #   bazel run //deploy/dev:clean             # tear down + drop volumes
 #   bazel run //deploy/dev:reset_runners     # restart host runner+relay
-#   bazel run //deploy/dev:rebuild_runner    # rebuild runner binary + container
+#   bazel run //deploy/dev:rebuild_runner    # rebuild host runner binary
 #
 # Implementation: dev_runner.sh cd's into BUILD_WORKSPACE_DIRECTORY/deploy/dev
 # (set by `bazel run`) and exec's dev.sh, so dev.sh's SCRIPT_DIR resolves to
-# the live source tree — required for `.env`, docker compose context, and the
-# bazel-built runner binary copy step.
+# the live source tree — required for `.env`, docker compose, and host runtime
+# files.
 #
 # `dev.sh` itself stays directly invokable (`./dev.sh --clean`) for backward
 # compat — these targets are an additional entry point, not a replacement.
@@ -32,6 +33,10 @@ DEV_SCRIPTS = [
     )
     for name, args in [
         ("up", []),
+        (
+            "up_prod_frontend",
+            ["--prod-frontend"],
+        ),
         (
             "backend_only",
             ["--backend-only"],

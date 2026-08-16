@@ -1,12 +1,10 @@
 # Docker Compose for AgentsMesh Development
 #
-# Backend / relay run on the developer host via `dev.sh` using
+# Backend / relay / runner run on the developer host via `dev.sh` using
 # `ibazel run //path:target` (hot reload for the services developers
-# touch most). Runner stays in docker — the AI agent processes it spawns
-# need a sandbox boundary, so we trade hot reload for isolation. The
-# runner binary is still produced by Bazel (`//runner/cmd/runner:runner`,
-# linux/amd64 cross-compiled by dev.sh) and COPYed into the dev image
-# at `docker compose build` time.
+# touch most) plus a host runner process with a local workspace root.
+# Docker only hosts stateful infrastructure. The runner services below are
+# kept behind an explicit profile for container-specific experiments.
 #
 # Traefik proxies the host-side backend / relay via `host.docker.internal`
 # (extra_hosts on Linux maps to host-gateway).
@@ -116,10 +114,14 @@ services:
     network_mode: "service:postgres"
 
   # Runner — sandboxes AI agent (Claude Code / Codex / Gemini) processes
-  # away from the developer host. Binary built by Bazel
+  # in docker when the explicit docker-runner profile is requested.
+  # Binary built by Bazel
   # (//runner/cmd/runner:runner, linux/amd64); image only adds the AI
   # CLI overlay. Hot reload off — rebuild via `./dev.sh --rebuild-runner`.
   runner:
+    profiles: ["docker-runner"]
+    security_opt:
+      - seccomp=./security/agentsmesh-codex-seccomp.json
     build:
       context: .
       dockerfile: runner.Dockerfile
@@ -187,6 +189,9 @@ services:
   # create pods on `dev-runner-2`. Same image as the primary runner; only
   # node_id, volumes, and MCP host port differ.
   runner-2:
+    profiles: ["docker-runner"]
+    security_opt:
+      - seccomp=./security/agentsmesh-codex-seccomp.json
     build:
       context: .
       dockerfile: runner.Dockerfile

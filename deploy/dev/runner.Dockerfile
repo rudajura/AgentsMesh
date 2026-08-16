@@ -16,7 +16,7 @@ FROM debian:trixie-slim
 # Base packages + AI CLI dependencies (Node 20+ for Gemini CLI).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates tzdata bash curl wget openssh-client openssl \
-    python3 build-essential g++ make sudo jq file \
+    python3 build-essential g++ make sudo jq file bubblewrap uidmap \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*

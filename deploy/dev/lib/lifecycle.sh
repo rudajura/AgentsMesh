@@ -2,16 +2,12 @@
 # shellcheck disable=SC1090
 # lifecycle.sh — start / stop / status / banner.
 #
-# Frontend launch (web + admin) goes through Bazel's `next_dev` so the
-# `@agentsmesh/*` internal packages — linked at //:node_modules via Bazel
-# `npm_link_package`, not by pnpm — are visible to Next.js.
+# Frontend launch goes through Bazel so `@agentsmesh/*` packages linked at
+# //:node_modules are visible to Next.js in dev and production-start modes.
 #
 # `clean` tears down everything dev.sh created (host pids, frontend ports,
 # docker volumes, .env). `reset_runners` is the targeted "rebuild + restart
-# the runner container" path used after a runner-only code change.
-
-# Banner / usage / docker-compose-up are factored out of the original main()
-# so the entry point is just orchestration.
+# host runner" path used after a runner-only code change.
 
 print_banner() {
     echo ""
@@ -25,13 +21,14 @@ print_usage() {
     cat << 'EOF'
 用法:
   bazel run //deploy/dev:up                 # 一键启动完整开发环境
+  bazel run //deploy/dev:up_prod_frontend   # build frontend once + next start
   bazel run //deploy/dev:backend_only       # 仅启动 docker + host backend/relay (CI)
-  bazel run //deploy/dev:rebuild_runner     # 重 build runner binary + 重启容器
+  bazel run //deploy/dev:rebuild_runner     # 重 build host runner + 重启 runner
   bazel run //deploy/dev:reset_runners      # 重启 host runner+relay (backend 不动)
   bazel run //deploy/dev:clean              # 停止并清理所有服务
 
   或直接调脚本（backward-compat）:
-  ./dev.sh [--backend-only|--rebuild-runner|--reset-runners|--clean|--help]
+  ./dev.sh [--backend-only|--prod-frontend|--dev-frontend|--rebuild-runner|--reset-runners|--clean|--help]
 
   改动 backend / relay 源码: ibazel 自动重 build (host)
   改动 runner 源码:        bazel run //deploy/dev:rebuild_runner
@@ -40,20 +37,20 @@ print_usage() {
 EOF
 }
 
-# `docker compose up -d --build` with a 3-attempt retry loop. The build
-# context is small but the npm registry / Docker Hub fetch is flaky on
-# fresh CI runners, so retries beat hard-fail every time.
+# `docker compose up -d` with a 3-attempt retry loop. Docker Hub fetches are
+# flaky on fresh CI runners, so retries beat hard-fail every time.
 docker_compose_up() {
-    info "启动 Docker 基础设施 + runner (首次可能需要几分钟)..."
+    info "启动 Docker 基础设施 (runner 在 host 上运行，首次可能需要几分钟)..."
     local up_attempt=0
     local up_max=3
+    local services=(postgres redis minio gitea adminer traefik jaeger otel-collector)
     while [ $up_attempt -lt $up_max ]; do
         up_attempt=$((up_attempt + 1))
         # set -o pipefail so docker compose's non-zero exit (auth.docker.io
         # token timeouts, build failures) actually fails the pipe — without
         # it grep returns 0 even if compose crashed and the loop exits
         # success'fully' while postgres is missing.
-        if (set -o pipefail; docker compose up -d --build --quiet-pull 2>&1 | grep -v "^#" | grep -v "^\[" | grep -v "^$"); then
+        if (set -o pipefail; docker compose up -d --quiet-pull "${services[@]}" 2>&1 | grep -v "^#" | grep -v "^\[" | grep -v "^$"); then
             break
         fi
         if [ $up_attempt -eq $up_max ]; then
@@ -63,6 +60,7 @@ docker_compose_up() {
         warn "compose up failed (attempt $up_attempt/$up_max) — retrying in 10s"
         sleep 10
     done
+    docker compose stop runner runner-2 >/dev/null 2>&1 || true
     success "Docker 基础设施已启动"
 }
 
@@ -76,35 +74,31 @@ wait_for_postgres() {
     success "PostgreSQL 已就绪"
 }
 
-# Kill stale runner CLI processes (in case anyone installed agentsmesh-runner
-# from `cargo install` or similar), rebuild the binary, then `docker compose
-# up -d --build runner` to pick up the fresh binary via the runner-binary
-# COPY in runner.Dockerfile.
+# Rebuild host runner artifacts, restart relay and runner, keep backend up.
 reset_runners() {
     if [[ -f "$ENV_FILE" ]]; then
+        source "$ENV_FILE"
+    else
+        generate_env
         source "$ENV_FILE"
     fi
 
     echo ""
     echo "=========================================="
-    echo "  Reset Runner (rebuild bazel binary + restart container)"
+    echo "  Reset Runner (rebuild bazel binary + restart host runner)"
     echo "=========================================="
     echo ""
 
-    if pgrep -f "agentsmesh-runner" &>/dev/null; then
-        info "停止本地 agentsmesh-runner 进程..."
-        pkill -f "agentsmesh-runner" 2>/dev/null || true
-        sleep 1
-        pkill -9 -f "agentsmesh-runner" 2>/dev/null || true
-    fi
-
-    build_runner_binary || return 1
-    build_mock_agent_binary || return 1
-
-    cd "$SCRIPT_DIR" || return 1
-    info "重建并重启 runner 容器..."
-    docker compose up -d --build runner 2>&1 | grep -v "^#" | grep -v warning || true
-    success "Runner 容器已重启 (binary 来自 bazel build)"
+    check_codex_sandbox_doctor
+    generate_ssl_certs
+    generate_ai_cli_configs
+    generate_runner_ssh_key
+    setup_gitea_ssh_config
+    _stop_host_service runner
+    _stop_host_service relay
+    start_relay_host || return 1
+    start_runner_host || return 1
+    success "Host runner 已重启"
 
     echo ""
 }
@@ -179,8 +173,9 @@ show_result() {
     echo "    backend  日志: tail -f deploy/dev/runtime/backend/backend.log"
     echo "    relay    日志: tail -f deploy/dev/runtime/relay/relay.log"
     echo ""
-    echo "  Docker runner (bazel-built binary, no hot reload):"
-    echo "    日志: docker compose logs -f runner"
+    echo "  Host runner:"
+    echo "    日志: tail -f deploy/dev/runtime/runner/runner.log"
+    echo "    workspace: $(host_runner_workspace_root)"
     echo "    重 build: ./dev.sh --rebuild-runner"
     echo ""
     echo "  测试账号:   dev@agentsmesh.local / devpass123"

@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 DEV_DIR="$ROOT_DIR/deploy/dev"
 FRONTEND_SERVICES="$DEV_DIR/lib/frontend_services.sh"
+FRONTEND_PROD_SERVICES="$DEV_DIR/lib/frontend_prod_services.sh"
 LIFECYCLE="$DEV_DIR/lib/lifecycle.sh"
 DEV_ENTRYPOINT="$DEV_DIR/dev.sh"
 
@@ -13,20 +14,23 @@ fail() {
     exit 1
 }
 
-bash -n "$DEV_ENTRYPOINT" "$FRONTEND_SERVICES" "$LIFECYCLE"
+bash -n "$DEV_ENTRYPOINT" "$FRONTEND_SERVICES" "$FRONTEND_PROD_SERVICES" "$LIFECYCLE"
 
 worktree_line=$(grep -nF 'source "$SCRIPT_DIR/lib/worktree.sh"' "$DEV_ENTRYPOINT" | cut -d: -f1)
 frontend_line=$(grep -nF 'source "$SCRIPT_DIR/lib/frontend_services.sh"' "$DEV_ENTRYPOINT" | cut -d: -f1)
+frontend_prod_line=$(grep -nF 'source "$SCRIPT_DIR/lib/frontend_prod_services.sh"' "$DEV_ENTRYPOINT" | cut -d: -f1)
 lifecycle_line=$(grep -nF 'source "$SCRIPT_DIR/lib/lifecycle.sh"' "$DEV_ENTRYPOINT" | cut -d: -f1)
-[[ -n "$worktree_line" && -n "$frontend_line" && -n "$lifecycle_line" ]] \
+[[ -n "$worktree_line" && -n "$frontend_line" && -n "$frontend_prod_line" && -n "$lifecycle_line" ]] \
     || fail "dev.sh is missing a lifecycle source"
-(( worktree_line < frontend_line && frontend_line < lifecycle_line )) \
-    || fail "source order must be worktree -> frontend_services -> lifecycle"
+(( worktree_line < frontend_line && frontend_line < frontend_prod_line && frontend_prod_line < lifecycle_line )) \
+    || fail "source order must be worktree -> frontend_services -> frontend_prod_services -> lifecycle"
 
 SCRIPT_DIR="$DEV_DIR"
 get_worktree_name() { echo "coverage-contract-worktree"; }
 # shellcheck source=lib/frontend_services.sh
 source "$FRONTEND_SERVICES"
+# shellcheck source=lib/frontend_prod_services.sh
+source "$FRONTEND_PROD_SERVICES"
 # shellcheck source=lib/lifecycle.sh
 source "$LIFECYCLE"
 
@@ -204,6 +208,25 @@ grep -Fq "api=http://localhost:34102 e2e=true domain= args=--output_base=$web_ba
     || fail "Web launch did not use its isolated output base and proxy environment"
 grep -Fq "api= e2e= domain=localhost:34102 args=--output_base=$admin_base run //clients/web-admin:next_dev -- --port 34101" "$CALL_LOG" \
     || fail "Admin launch did not use its isolated output base and proxy environment"
+
+: > "$CALL_LOG"
+AGENTSMESH_DEV_FRONTEND_MODE=prod
+start_frontend
+start_admin_frontend
+for _ in {1..100}; do
+    [[ $(wc -l < "$CALL_LOG" 2>/dev/null || echo 0) -ge 4 ]] && break
+    sleep 0.01
+done
+unset AGENTSMESH_DEV_FRONTEND_MODE
+
+grep -Fq "api=http://localhost:34102 e2e=true domain=localhost:34102 args=--output_base=$web_base build //clients/web:next" "$CALL_LOG" \
+    || fail "Web prod launch did not build its Next bundle with local proxy env"
+grep -Fq "api=http://localhost:34102 e2e=true domain=localhost:34102 args=--output_base=$web_base run //clients/web:next_start" "$CALL_LOG" \
+    || fail "Web prod launch did not run next_start with its isolated output base"
+grep -Fq "api= e2e= domain=localhost:34102 args=--output_base=$admin_base build //clients/web-admin:next" "$CALL_LOG" \
+    || fail "Admin prod launch did not build its Next bundle"
+grep -Fq "api= e2e= domain=localhost:34102 args=--output_base=$admin_base run //clients/web-admin:next_start" "$CALL_LOG" \
+    || fail "Admin prod launch did not run next_start with its isolated output base"
 
 mkdir -p "$web_base" "$admin_base"
 ENV_FILE="$tmp_root/not-initialized.env"

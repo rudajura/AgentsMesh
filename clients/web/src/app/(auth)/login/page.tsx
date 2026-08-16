@@ -19,6 +19,7 @@ import { AuthShell } from "@/components/auth/AuthShell";
 import { OAuthButtons } from "./OAuthButtons";
 import { SSOSection } from "./SSOSection";
 import { Divider } from "./Divider";
+import { useDevAutoLogin } from "./useDevAutoLogin";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -72,6 +73,13 @@ export default function LoginPage() {
     });
     router.push(url);
   };
+  useDevAutoLogin({
+    disabled: searchParams.get("devAutoLogin") === "0",
+    navigateAfterLogin,
+    setLoading,
+    setError,
+    errorMessage: t("auth.loginPage.invalidCredentials"),
+  });
 
   const handleLdapSubmit = async (username: string, pwd: string) => {
     const ldapConfig = ssoConfigs.find((c) => c.protocol === "ldap");

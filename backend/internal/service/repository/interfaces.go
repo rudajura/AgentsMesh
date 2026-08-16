@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/anthropics/agentsmesh/backend/internal/domain/gitprovider"
+	"github.com/anthropics/agentsmesh/backend/internal/infra/git"
 )
 
 type RepositoryServiceInterface interface {
@@ -30,6 +31,7 @@ type WebhookServiceInterface interface {
 	MarkWebhookAsConfigured(ctx context.Context, repo *gitprovider.Repository) error
 	VerifyWebhookSecret(ctx context.Context, repoID int64, secret string) (bool, error)
 	GetRepositoryByIDWithWebhook(ctx context.Context, repoID int64) (*gitprovider.Repository, error)
+	ListMergeRequestsLive(ctx context.Context, repo *gitprovider.Repository, userID int64, branch, state string) ([]*git.MergeRequest, error)
 }
 
 var _ RepositoryServiceInterface = (*Service)(nil)

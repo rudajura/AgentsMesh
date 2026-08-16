@@ -36,6 +36,7 @@ func CreateDeps(cfg *config.Config) (RunnerDeps, error) {
 	connOpts := []client.GRPCConnectionOption{
 		client.WithGRPCServerURL(cfg.ServerURL),
 		client.WithGRPCRunnerVersion(cfg.Version),
+		client.WithGRPCMCPPort(cfg.GetMCPPort()),
 	}
 	// Wire endpoint auto-discovery: persist new endpoints to config file.
 	if cfg.ConfigFilePath != "" {

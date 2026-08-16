@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Frontend dependency checks and isolated Bazel devserver lifecycle.
+# Frontend dependency checks and isolated Bazel server lifecycle.
 
 # Reusable lockfile-driven pnpm install: skips if node_modules is in sync
 # with pnpm-lock.yaml (md5 fingerprint), reinstalls otherwise. Returns
@@ -62,6 +62,10 @@ _remove_frontend_bazel_output_base() {
     return 0
 }
 
+_frontend_mode() {
+    [[ "${AGENTSMESH_DEV_FRONTEND_MODE:-dev}" =~ ^(prod|production)$ ]] && echo "prod" || echo "dev"
+}
+
 # Common pre-flight for both Next.js dev servers: clear stale lockfile and port
 # squatters. Returns 1 if the port belongs to a process this worktree cannot own.
 _prepare_next_port() {
@@ -116,16 +120,21 @@ start_frontend() {
     local root_dir="$SCRIPT_DIR/../.."
     local bazel_output_base
     bazel_output_base=$(_frontend_bazel_output_base web)
-    info "启动前端服务 (端口: $web_port, Bazel devserver)..."
-    local saved_dir="$PWD"
-    cd "$root_dir"
-    # API_PROXY_TARGET drives next.config.ts rewrites through the worktree's
-    # Traefik entrypoint. NEXT_PUBLIC_E2E enables only test-owned UI surfaces.
-    API_PROXY_TARGET="http://localhost:$HTTP_PORT" \
-    NEXT_PUBLIC_E2E="true" \
-        bazel --output_base="$bazel_output_base" run //clients/web:next_dev -- --port "$web_port" > "$log_file" 2>&1 < /dev/null &
-    disown $!
-    cd "$saved_dir"
+    if [[ "$(_frontend_mode)" == "prod" ]]; then
+        info "启动前端服务 (端口: $web_port, Bazel production server)..."
+        _start_frontend_prod "$web_port" "$log_file" "$root_dir" "$bazel_output_base" || return 1
+    else
+        info "启动前端服务 (端口: $web_port, Bazel devserver)..."
+        local saved_dir="$PWD"
+        cd "$root_dir"
+        # API_PROXY_TARGET drives next.config.ts rewrites through the worktree's
+        # Traefik entrypoint. NEXT_PUBLIC_E2E enables only test-owned UI surfaces.
+        API_PROXY_TARGET="http://localhost:$HTTP_PORT" \
+        NEXT_PUBLIC_E2E="true" \
+            bazel --output_base="$bazel_output_base" run //clients/web:next_dev -- --port "$web_port" > "$log_file" 2>&1 < /dev/null &
+        disown $!
+        cd "$saved_dir"
+    fi
 
     local max_wait=60
     for ((i=1; i<=max_wait; i++)); do
@@ -158,14 +167,19 @@ start_admin_frontend() {
     local root_dir="$SCRIPT_DIR/../.."
     local bazel_output_base
     bazel_output_base=$(_frontend_bazel_output_base web-admin)
-    info "启动 Admin Console (端口: $web_admin_port, Bazel devserver)..."
-    local saved_dir="$PWD"
-    cd "$root_dir"
-    # web-admin derives its backend rewrite from PRIMARY_DOMAIN.
-    PRIMARY_DOMAIN="localhost:$HTTP_PORT" \
-        bazel --output_base="$bazel_output_base" run //clients/web-admin:next_dev -- --port "$web_admin_port" > "$log_file" 2>&1 < /dev/null &
-    disown $!
-    cd "$saved_dir"
+    if [[ "$(_frontend_mode)" == "prod" ]]; then
+        info "启动 Admin Console (端口: $web_admin_port, Bazel production server)..."
+        _start_admin_frontend_prod "$web_admin_port" "$log_file" "$root_dir" "$bazel_output_base" || return 1
+    else
+        info "启动 Admin Console (端口: $web_admin_port, Bazel devserver)..."
+        local saved_dir="$PWD"
+        cd "$root_dir"
+        # web-admin derives its backend rewrite from PRIMARY_DOMAIN.
+        PRIMARY_DOMAIN="localhost:$HTTP_PORT" \
+            bazel --output_base="$bazel_output_base" run //clients/web-admin:next_dev -- --port "$web_admin_port" > "$log_file" 2>&1 < /dev/null &
+        disown $!
+        cd "$saved_dir"
+    fi
 
     local max_wait=60
     for ((i=1; i<=max_wait; i++)); do

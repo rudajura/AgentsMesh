@@ -29,3 +29,35 @@ check_ibazel_doctor() {
         echo "  npm i -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli"
     fi
 }
+
+check_codex_sandbox_doctor() {
+    [[ "$(uname -s)" == "Linux" ]] || return 0
+
+    if [[ -r /proc/sys/kernel/unprivileged_userns_clone ]]; then
+        local enabled
+        enabled="$(< /proc/sys/kernel/unprivileged_userns_clone)"
+        if [[ "$enabled" != "1" ]]; then
+            error "Codex sandbox nebude v host runneru fungovat: kernel.unprivileged_userns_clone=$enabled"
+            cat << 'EOF'
+    sudo sysctl -w kernel.unprivileged_userns_clone=1
+    echo 'kernel.unprivileged_userns_clone=1' | sudo tee /etc/sysctl.d/99-agentsmesh-codex.conf
+    sudo sysctl --system
+EOF
+            exit 1
+        fi
+    fi
+
+    if [[ -r /proc/sys/user/max_user_namespaces ]]; then
+        local max_userns
+        max_userns="$(< /proc/sys/user/max_user_namespaces)"
+        if [[ "$max_userns" == "0" ]]; then
+            error "Codex sandbox nebude v host runneru fungovat: user.max_user_namespaces=0"
+            cat << 'EOF'
+    sudo sysctl -w user.max_user_namespaces=28633
+    echo 'user.max_user_namespaces=28633' | sudo tee /etc/sysctl.d/99-agentsmesh-codex.conf
+    sudo sysctl --system
+EOF
+            exit 1
+        fi
+    fi
+}

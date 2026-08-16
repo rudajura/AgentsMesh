@@ -21,3 +21,13 @@ onlyBuiltDependencies:
   - electron
   - esbuild
   - "@parcel/watcher"
+allowBuilds:
+  '@bufbuild/buf': false
+  '@parcel/watcher': false
+  '@swc/core': false
+  core-js: false
+  electron: false
+  esbuild: false
+  protobufjs: false
+  sharp: false
+  unrs-resolver: false
